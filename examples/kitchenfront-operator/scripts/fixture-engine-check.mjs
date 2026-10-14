@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {isAbsolute, join} from 'node:path';
 import {AppServerRpc, isolatedEngineEnvironment} from '../lib/rpc.mjs';
 import {loopbackFixtureSeatbeltProfile} from '../lib/isolation.mjs';
+import {assertCurrentLinuxNetworkIsolation} from '../lib/linux-fixture-isolation.mjs';
 import {
   createFixtureResponsesProvider,
   FIXTURE_CASE_IDS,
@@ -22,7 +23,6 @@ const [binaryInput, expectedHash, ...extraArgs] = process.argv.slice(2);
 if (extraArgs.length || !binaryInput || !isAbsolute(binaryInput) || !/^[a-f0-9]{64}$/.test(expectedHash ?? '')) {
   throw new Error('Provide only an absolute dedicated app-server binary path and its recorded SHA-256.');
 }
-if (process.platform !== 'darwin') throw new Error('This fixture engine check requires the reviewed macOS outer sandbox.');
 const binary = realpathSync(binaryInput);
 if (!statSync(binary).isFile()) throw new Error('The selected app-server binary is not a regular file.');
 const actualHash = createHash('sha256').update(readFileSync(binary)).digest('hex');
@@ -30,6 +30,9 @@ assert.equal(actualHash, expectedHash, 'The selected binary must match its recor
 
 const runtime = realpathSync(mkdtempSync(join(tmpdir(), 'kf-codex-fixture-engine-')));
 chmodSync(runtime, 0o700);
+let containmentReport = process.platform === 'linux'
+  ? {scope: 'LINUX_NETWORK_NAMESPACE_ONLY', established: false, filesystemIsolation: false}
+  : null;
 let provider;
 let child;
 let peer;
@@ -68,6 +71,9 @@ function waitForChildClose(ms) {
 }
 
 try {
+  if (process.platform === 'linux') containmentReport = assertCurrentLinuxNetworkIsolation();
+  else if (process.platform !== 'darwin') throw new Error('This fixture engine check requires the reviewed macOS sandbox or an isolated Linux network namespace.');
+
   provider = await createFixtureResponsesProvider();
   const port = provider.port;
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('The fixture provider returned an invalid loopback port.');
@@ -92,12 +98,20 @@ try {
   ].join('\n');
   writeFileSync(join(runtime, 'config.toml'), config, {mode: 0o600});
 
-  const profile = loopbackFixtureSeatbeltProfile(binary, runtime, port);
-  child = spawn('/usr/bin/sandbox-exec', ['-p', profile, binary, '--listen', 'stdio://'], {
-    cwd: runtime,
-    env: isolatedEngineEnvironment(runtime),
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  if (process.platform === 'darwin') {
+    const profile = loopbackFixtureSeatbeltProfile(binary, runtime, port);
+    child = spawn('/usr/bin/sandbox-exec', ['-p', profile, binary, '--listen', 'stdio://'], {
+      cwd: runtime,
+      env: isolatedEngineEnvironment(runtime),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } else {
+    child = spawn(binary, ['--listen', 'stdio://'], {
+      cwd: runtime,
+      env: isolatedEngineEnvironment(runtime),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  }
   child.once('close', (code, signal) => {
     childClosed = true;
     resolveChildClose({code, signal});
@@ -150,6 +164,7 @@ try {
     exactToolCatalogueVerifiedForEveryResponse: report.verifiedCatalogues === report.requestCount,
     externalProviderContact: false,
     resultsPersisted: false,
+    ...(containmentReport ? {containment: containmentReport} : {}),
   })}\n`);
 } catch (error) {
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{2,64}$/.test(error.code) ? error.code : null;
@@ -159,6 +174,7 @@ try {
     realModelCalls: 0,
     failedCaseId,
     error: {name: typeof error?.name === 'string' ? error.name : 'Error', code},
+    ...(containmentReport ? {containment: containmentReport} : {}),
     localFixture: provider?.report() ?? null,
     safeEvents,
   })}\n`);

@@ -1,0 +1,85 @@
+name: Kitchen Front Linux engine proof
+on:
+  push:
+    branches: [codex/linux-engine-proof]
+    paths:
+      - .github/workflows/kitchenfront-linux-engine.yml
+      - examples/kitchenfront-operator/scripts/fixture-engine-check.mjs
+      - examples/kitchenfront-operator/lib/linux-fixture-isolation.mjs
+      - examples/kitchenfront-operator/test/linux-fixture-isolation.test.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kitchenfront-linux-engine-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  linux-engine:
+    if: github.repository == 'benfr97/kitchenfront-codex'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: '1'
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+      - name: Check exact reviewed engine tree and initial headroom
+        run: |
+          test "$(git rev-parse HEAD:codex-rs)" = 4d512d273d6bcd74b74b84de43a2090f8234a3d1
+          test "$(df -Pk . | awk 'NR==2 {print $4}')" -gt 2097152
+      - name: Install upstream build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler iproute2
+      - name: Install exact upstream Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Check example and namespace admission tests
+        working-directory: examples/kitchenfront-operator
+        run: node --test test/*.test.mjs
+      - name: Compile the dedicated Linux engine
+        working-directory: codex-rs
+        run: cargo +1.95.0 build --locked --release -p codex-app-server --bin codex-app-server
+      - name: Record source, executable size and dynamic libraries
+        run: |
+          binary="$PWD/codex-rs/target/release/codex-app-server"
+          test -f "$binary"
+          printf 'Engine source: %s\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Rust tree: %s\n' "$(git rev-parse HEAD:codex-rs)" >> "$GITHUB_STEP_SUMMARY"
+          sha256sum "$binary" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Executable bytes: %s\n' "$(stat --format=%s "$binary")" >> "$GITHUB_STEP_SUMMARY"
+          ldd "$binary"
+      - name: Run the actual engine with a model-free fixture in a private network namespace
+        run: |
+          binary="$PWD/codex-rs/target/release/codex-app-server"
+          script="$PWD/examples/kitchenfront-operator/scripts/fixture-engine-check.mjs"
+          expected_hash="$(sha256sum "$binary" | cut -d ' ' -f1)"
+          node_binary="$(command -v node)"
+          wrapper="$RUNNER_TEMP/kf-netns-fixture.sh"
+          # Preserve a kernel-backed handle to the original network namespace.
+          # setpriv drops privilege without a PAM/FD-closing session boundary.
+          cat > "$wrapper" <<'SH'
+          #!/bin/sh
+          set -eu
+          if [ "$1" = enter ]; then
+            shift
+            exec 3</proc/self/ns/net
+            exec /usr/bin/unshare --net -- "$0" inside "$@"
+          fi
+          test "$1" = inside
+          shift
+          /usr/sbin/ip link set lo up
+          exec /usr/bin/setpriv --reuid "$1" --regid "$2" --init-groups --no-new-privs -- "$3" "$4" "$5" "$6"
+          SH
+          chmod 700 "$wrapper"
+          sudo "$wrapper" enter "$(id -u)" "$(id -g)" "$node_binary" "$script" "$binary" "$expected_hash"
+          printf '%s\n' 'Protocol fixture only: no genuine model or provider call; no hosted acceptance.' >> "$GITHUB_STEP_SUMMARY"
+      # Deliberately no artifact/cache upload or deployment. Logs record the
+      # public engine proof; private product code, accounts and keys are absent.
