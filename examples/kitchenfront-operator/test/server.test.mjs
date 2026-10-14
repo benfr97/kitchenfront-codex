@@ -40,6 +40,9 @@ test('local API rejects cross-origin, wrong CSRF and arbitrary RPC; never starts
   assert.equal((await c.post('/api/rpc', {method: 'thread/shellCommand'})).status, 404);
   const live = await c.post('/api/turns', {question: 'Run a live test', requestId: randomUUID()});
   assert.equal(live.status, 503); assert.equal((await live.json()).code, 'LIVE_AI_DISABLED'); assert.deepEqual((await c.get()).messages, []);
+  const unconnected = await c.post('/api/seeded-records', {});
+  assert.equal(unconnected.status, 503); assert.equal((await unconnected.json()).code, 'SHARED_CONNECTION_NOT_ADMITTED');
+  assert.equal((await c.post('/api/seeded-records', {provider: 'google'})).status, 400);
   const wrongHost = await new Promise((resolve, reject) => {
     const req = request(`${origin}/api/session`, {headers: {host: 'untrusted.example'}}, res => { res.resume(); resolve(res.statusCode); });
     req.on('error', reject); req.end();

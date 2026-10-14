@@ -8,6 +8,8 @@ import {SessionStore} from './lib/store.mjs';
 import {DemoError, replayScenario, decideProposal, CASE_IDS} from './lib/fixtures.mjs';
 import {loadSealedPacket} from './lib/date-snapshot.mjs';
 import {currentStateFactory, publicDateContext} from './lib/current-session.mjs';
+import {SeededReaderError} from './lib/seeded-reader.mjs';
+import {assertSeedReaders, assertSeedReadback, boundedSeedOperation} from './lib/seeded-session.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const BLOCKER = 'Live AI is disabled until the credential, external-network policy and bounded model-test budget are approved and checked. Offline replay only tests the interface.';
@@ -29,14 +31,31 @@ async function jsonBody(req) {
 }
 function json(res, status, value) { res.writeHead(status, {'Content-Type': 'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 
-export function createPrototypeServer({store} = {}) {
+export function createPrototypeServer({store, seededReadersForSession = null, seededPrincipal = null, seedReadTimeoutMs = 15000} = {}) {
   if (!(store instanceof SessionStore)) throw new Error('Provide an explicit owned session store with its reviewed state factory.');
+  if (!Number.isInteger(seedReadTimeoutMs) || seedReadTimeoutMs < 10 || seedReadTimeoutMs > 30000) throw new Error('Use a bounded seed-read deadline.');
+  const principal = seededPrincipal && Object.freeze(structuredClone(seededPrincipal));
+  const principalReady = principal && Object.keys(principal).sort().join(',') === 'actorId,organizationId' && [principal.actorId, principal.organizationId].every(value => typeof value === 'string' && value.trim() && value.length <= 256);
   const active = new Map();
+  const seedReaders = new Map();
+  const pendingSeedOperations = new Set();
+  let cleanupPromise = Promise.resolve();
+  const dropReaders = generation => {
+    const cached = seedReaders.get(generation);
+    if (cached) clearTimeout(cached.expiryTimer);
+    seedReaders.delete(generation);
+  };
+  const pruneReaders = () => { for (const [key, value] of seedReaders) if (value.expiresAt <= store.now()) dropReaders(key); };
+  const requireIdle = token => {
+    const current = active.get(token);
+    if (current) throw new DemoError(current.status === 'blocked_unknown' ? 'READ_CLEANUP_UNKNOWN' : 'REQUEST_ACTIVE', current.status === 'blocked_unknown' ? 'The owned account read has not settled after interruption. Further actions remain held for reconciliation.' : 'Wait for the current request to finish.', 409);
+  };
   const files = new Map([['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/styles.css', ['styles.css', 'text/css']]]);
   const server = createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
+      pruneReaders();
       const port = server.address()?.port;
       if (![ `127.0.0.1:${port}`, `localhost:${port}` ].includes(req.headers.host)) throw new DemoError('HOST_REJECTED', 'Use this prototype’s local address.', 403);
       if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) throw new DemoError('ORIGIN_REJECTED', 'A different site cannot use this prototype.', 403);
@@ -50,12 +69,62 @@ export function createPrototypeServer({store} = {}) {
       let session = store.get(token);
       if (req.method === 'GET' && path === '/api/session') {
         if (!session) { session = store.create(); res.setHeader('Set-Cookie', `kf_demo=${session.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800`); }
-        json(res, 200, publicState(session)); return;
+        json(res, 200, {...publicState(session), providerReadState: active.get(session.token)?.status ?? null}); return;
       }
       if (req.method !== 'POST') throw new DemoError('METHOD_NOT_ALLOWED', 'This API action requires POST.', 405);
       if (!session) throw new DemoError('SESSION_REQUIRED', 'Open the fictional session before continuing.', 401);
       if (req.headers.origin !== `http://${req.headers.host}` || !equal(req.headers['x-csrf-token'], session.csrfToken)) throw new DemoError('CSRF_REJECTED', 'Reload this page before continuing.', 403);
       const body = await jsonBody(req);
+      if (path === '/api/seeded-records') {
+        exact(body, []);
+        if (typeof seededReadersForSession !== 'function') throw new DemoError('SHARED_CONNECTION_NOT_ADMITTED', 'The shared demo accounts are awaiting the accepted restricted broker and seed receipts.', 503);
+        if (!principalReady) throw new DemoError('SHARED_CONNECTION_NOT_ADMITTED', 'The independently approved demo principal is missing.', 503);
+        requireIdle(session.token);
+        const generation = session.state.generation;
+        if (session.state.snapshot?.status !== 'ready_offline') throw new DemoError('SNAPSHOT_REQUIRED', 'A current server-pinned demo session is required.', 409);
+        const controller = new AbortController();
+        const entry = {controller, status: 'running'};
+        active.set(session.token, entry);
+        const ensureCurrent = () => {
+          if (controller.signal.aborted) throw new DemoError('SEED_READ_INTERRUPTED_UNKNOWN', 'The account read was interrupted. No records are released.', 503);
+          if (store.get(session.token) !== session || session.expiresAt <= store.now() || session.state.generation !== generation) throw new DemoError('SESSION_EXPIRED_DURING_READ', 'This session expired or changed while the account records were being read.', 401);
+        };
+        const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+        res.once('close', disconnected);
+        const sessionExpiryTimer = setTimeout(() => controller.abort(new DemoError('SESSION_EXPIRED_DURING_READ', 'This session expired while the account records were being read.', 401)), Math.max(1, session.expiresAt - store.now()));
+        sessionExpiryTimer.unref();
+        const operation = boundedSeedOperation(async () => {
+          ensureCurrent();
+          if (!seedReaders.has(generation)) {
+            // Only server configuration supplies principal, broker and receipts.
+            const readers = await seededReadersForSession(Object.freeze({sessionId: generation, clock: store.now, principal, signal: controller.signal}));
+            ensureCurrent();
+            assertSeedReaders(readers, generation, principal);
+            const cached = {expiresAt: session.expiresAt, readers: Object.freeze([...readers])};
+            cached.expiryTimer = setTimeout(() => dropReaders(generation), Math.max(1, session.expiresAt - store.now()));
+            cached.expiryTimer.unref();
+            seedReaders.set(generation, cached);
+          }
+          const readers = seedReaders.get(generation).readers;
+          assertSeedReaders(readers, generation, principal);
+          const reads = await Promise.allSettled(readers.map(reader => reader.readAcceptedSeeds({signal: controller.signal})));
+          ensureCurrent();
+          const failure = reads.find(read => read.status === 'rejected');
+          if (failure) throw failure.reason;
+          const snapshots = reads.map((read, index) => { assertSeedReadback(read.value, readers[index]); return read.value; });
+          ensureCurrent();
+          return {status: 'provider_seed_readback', generation, snapshots};
+        }, {controller, timeoutMs: seedReadTimeoutMs, onSettled: () => { if (active.get(session.token) === entry) active.delete(session.token); }});
+        pendingSeedOperations.add(operation.completion);
+        operation.completion.then(() => { clearTimeout(sessionExpiryTimer); pendingSeedOperations.delete(operation.completion); });
+        try {
+          const result = await operation.response;
+          ensureCurrent(); json(res, 200, result); return;
+        } finally {
+          res.off('close', disconnected);
+          if (!operation.settled) entry.status = 'blocked_unknown';
+        }
+      }
       if (path === '/api/turns') {
         exact(body, ['requestId', 'question']);
         if (!uuid(body.requestId) || typeof body.question !== 'string' || !body.question.trim() || body.question.length > 2400) throw new DemoError('INVALID_REQUEST', 'Provide a new request ID and a short question.');
@@ -66,9 +135,9 @@ export function createPrototypeServer({store} = {}) {
         // No inference is started in this build. A missing task is not proof of provider cancellation.
         json(res, 200, {status: 'not_running', providerCancellation: 'not_applicable', message: 'No live AI request is running in this build.'}); return;
       }
-      if (active.has(session.token)) throw new DemoError('REQUEST_ACTIVE', 'Wait for this fictional request to finish before changing the scenario.', 409);
+      requireIdle(session.token);
       if (path === '/api/reset') {
-        exact(body, []); store.replaceState(session, store.freshState()); json(res, 200, publicState(session)); return;
+        exact(body, []); const priorGeneration = session.state.generation; store.replaceState(session, store.freshState()); dropReaders(priorGeneration); json(res, 200, publicState(session)); return;
       }
       const decision = /^\/api\/proposals\/([0-9a-f-]+)\/decision$/.exec(path);
       if (decision) {
@@ -103,12 +172,23 @@ export function createPrototypeServer({store} = {}) {
         store.replaceState(session, failed); emit({type: 'turn.failed', code: error instanceof DemoError ? error.code : 'REPLAY_FAILED', message: error instanceof DemoError ? error.message : 'This offline replay failed. No proposal was committed.', status: 'failed'});
       } finally { active.delete(session.token); res.end(); }
     } catch (error) {
-      if (!res.headersSent) json(res, error instanceof DemoError ? error.status : 500, {code: error instanceof DemoError ? error.code : 'INTERNAL_ERROR', message: error instanceof DemoError ? error.message : 'The local prototype could not complete this action.'});
+      if (res.destroyed) return;
+      if (!res.headersSent) json(res, error instanceof DemoError ? error.status : error instanceof SeededReaderError ? 503 : 500, {code: error instanceof DemoError || error instanceof SeededReaderError ? error.code : 'INTERNAL_ERROR', message: error instanceof DemoError || error instanceof SeededReaderError ? error.message : 'The local prototype could not complete this action.'});
       else res.end();
     }
   });
   server.requestTimeout = 10_000; server.headersTimeout = 10_000; server.maxHeadersCount = 40;
-  server.once('close', () => store.close());
+  server.waitForSeededCleanup = () => cleanupPromise;
+  server.seededReaderCacheSize = () => seedReaders.size;
+  server.once('close', () => {
+    for (const entry of active.values()) entry?.controller?.abort();
+    for (const key of seedReaders.keys()) dropReaders(key);
+    // Socket closure is not evidence that callbacks stopped. Keep the exact
+    // state-owner lock until every owned factory/read has actually settled.
+    if (!pendingSeedOperations.size) { store.close(); return; }
+    cleanupPromise = Promise.allSettled([...pendingSeedOperations]).then(() => store.close());
+    cleanupPromise.catch(() => {}); // The preserved owner lock is the recovery fence.
+  });
   return server;
 }
 

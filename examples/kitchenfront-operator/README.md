@@ -1,6 +1,6 @@
 # Kitchen Front Codex prototype
 
-A separate experimental phone client for the open-source Codex App Server. The SDK Demo continues in its own chat, branch and preview. This client does not replace it.
+An experimental phone client for the open-source Codex App Server. Under Ben’s latest direction, Codex fork is the continuing consolidated product owner. Demo is finishing the guarded shared-account setup and transferring its accepted design and behaviour before pausing. That handoff is pending; this example is not yet the completed hosted product, and no second agent engine is being imported.
 
 The engine uses this fork’s App Server protocol and opt-in dynamic-only router. Record the exact source revision and executable hash for each build. A separately recorded macOS development build has passed isolated initialisation; this is not a genuine AI or hosted acceptance result.
 
@@ -41,3 +41,9 @@ The presentation snapshot bounds fixed mail to five past messages and calendar t
 For model-free actual-engine plumbing, `node scripts/fixture-engine-check.mjs /absolute/path/to/codex-app-server RECORDED_SHA256` uses a single owned loopback Responses fixture. Every result is labelled `PROTOCOL_FIXTURE_ONLY`; fake fixture token usage must never enter a live budget ledger or a product conversation. It verifies the tool protocol, not model reasoning. Neither that fixture nor an offline UI replay enables `/api/turns`.
 
 Inherited upstream blocking, postmerge and V8 workflows are guarded to the upstream repository. The focused prototype check uses standard Ubuntu only, with no artifact/cache uploads. Do not enable inherited large-runner workflows in this fork.
+
+## Shared seeded-account consumer (not activated)
+
+The separate `SEEDED-READER-CONTRACT.md` describes a proposed server-only port for reading Demo’s same provider records. It requires independently pinned accepted receipt bytes and an exact trusted principal/session/account/grant/resource/source binding. It admits only a bounded approved view, not the full seed ledger. It validates original dates, exact returned IDs, versions, content hashes and resource membership; provider failure cannot use a fictional fallback. There is no OAuth, import, provider transport or credential in this module.
+
+`POST /api/seeded-records` accepts only `{}` with the existing session cookie, same origin and CSRF token. It returns `503 SHARED_CONNECTION_NOT_ADMITTED` by default. Only reviewed server configuration can supply the two exact readers through `seededReadersForSession`; the CLI does not configure or enable that factory. The application caches admitted readers per session generation, holds its activity guard until both accounts settle, rejects a changed session/account result, and returns neither account on partial failure. Reset invalidates the old reader generation. This prepared HTTP path is not actual account connection or provider parity proof.

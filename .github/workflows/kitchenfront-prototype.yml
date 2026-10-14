@@ -1,7 +1,7 @@
 name: Kitchen Front isolated prototype checks
 on:
   push:
-    branches: [codex/phone-prototype]
+    branches: [codex/phone-prototype, codex/shared-seed-consumer]
     paths:
       - examples/kitchenfront-operator/**
       - codex-rs/core/src/tools/spec_plan.rs
@@ -30,7 +30,11 @@ jobs:
           BEFORE: ${{ github.event.before }}
           EVENT: ${{ github.event_name }}
         run: |
-          if [ "$EVENT" = workflow_dispatch ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+          # This complete Rust tree passed all three restricted-router tests in
+          # run38610285570. Reuse only exact tree equivalence; dispatch forces a rebuild.
+          if [ "$EVENT" != workflow_dispatch ] && [ "$(git rev-parse HEAD:codex-rs)" = 4d512d273d6bcd74b74b84de43a2090f8234a3d1 ]; then
+            echo 'engine=false' >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = workflow_dispatch ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             echo 'engine=true' >> "$GITHUB_OUTPUT"
           elif git diff --quiet "$BEFORE" "$GITHUB_SHA" -- codex-rs/; then
             echo 'engine=false' >> "$GITHUB_OUTPUT"
