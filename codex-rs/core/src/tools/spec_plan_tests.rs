@@ -1153,11 +1153,11 @@ async fn dynamic_only_branch_returns_only_direct_dynamic_tools() {
     ]);
     normal_plan.assert_registered_contains(&[
         "exec_command",
-        "mcp__calendar.lookup",
-        "crm.lookup",
+        "mcp__calendarlookup",
+        "crmlookup",
         "extension_echo",
         "request_plugin_install",
-        "collaboration.spawn_agent",
+        "collaborationspawn_agent",
     ]);
 
     set_features(&mut turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
@@ -1175,10 +1175,10 @@ async fn dynamic_only_branch_returns_only_direct_dynamic_tools() {
     ]);
     code_mode_plan.assert_registered_contains(&[
         "exec_command",
-        "mcp__calendar.lookup",
-        "crm.lookup",
+        "mcp__calendarlookup",
+        "crmlookup",
         "extension_echo",
-        "collaboration.spawn_agent",
+        "collaborationspawn_agent",
     ]);
     let code_mode_router = plan_with_model(
         &turn,
