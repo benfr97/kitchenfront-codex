@@ -1,0 +1,73 @@
+name: Kitchen Front isolated prototype checks
+on:
+  push:
+    branches: [codex/phone-prototype]
+    paths:
+      - examples/kitchenfront-operator/**
+      - codex-rs/core/src/tools/spec_plan.rs
+      - codex-rs/core/src/tools/spec_plan_tests.rs
+      - .github/workflows/kitchenfront-prototype.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kitchenfront-prototype-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  changes:
+    if: github.repository == 'benfr97/kitchenfront-codex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      engine: ${{ steps.scope.outputs.engine }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: scope
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo 'engine=true' >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BEFORE" "$GITHUB_SHA" -- codex-rs/; then
+            echo 'engine=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'engine=true' >> "$GITHUB_OUTPUT"
+          fi
+  client:
+    if: github.repository == 'benfr97/kitchenfront-codex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+      - run: node --test test/*.test.mjs
+        working-directory: examples/kitchenfront-operator
+  restricted-engine:
+    needs: changes
+    if: github.repository == 'benfr97/kitchenfront-codex' && needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install upstream build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+      - name: Install exact upstream Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Compile and run the dynamic-only router tests
+        working-directory: codex-rs
+        run: cargo test --locked -p codex-core --lib dynamic_only -- --nocapture

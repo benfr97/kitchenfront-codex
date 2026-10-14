@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f3f0e8">
+    <meta name="description" content="A fictional Kitchen Front Operator prototype.">
+    <title>Kitchen Front Operator</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <a class="wordmark" href="/" aria-label="Kitchen Front Operator home">
+          <span>Kitchen Front</span>
+          <span class="wordmark-product">Operator</span>
+        </a>
+        <div class="header-actions">
+          <p class="engine-status" id="engine-status" role="status">Loading prototype status</p>
+          <button class="text-button" id="reset-open" type="button" disabled>Reset demo</button>
+        </div>
+      </header>
+
+      <aside class="simulation-notice" aria-label="Simulation notice">
+        <span class="notice-marker" aria-hidden="true"></span>
+        <p>Fictional workspace. Email and calendar effects are simulated. Inference is disabled until reviewed.</p>
+        <span class="engine-detail" id="engine-detail">Engine status loading</span>
+        <span class="engine-detail" id="scenario-clock">Fictional date loading</span>
+      </aside>
+
+      <div class="app-layout">
+        <aside class="task-rail" aria-label="Fictional tasks and examples">
+          <div class="rail-heading">
+            <h2>Choose a task</h2>
+            <p>Three fictional examples</p>
+          </div>
+          <nav class="task-list" id="task-list" aria-label="Fictional tasks"></nav>
+          <details class="replay-disclosure">
+            <summary>Offline replays</summary>
+            <p class="replay-explainer">Deterministic examples only. These are not AI responses.</p>
+            <div class="replay-list" id="replay-list"></div>
+          </details>
+          <p class="rail-footnote">Nothing here contacts a customer or creates a real booking.</p>
+        </aside>
+
+        <main class="conversation" id="main-content">
+          <header class="conversation-heading">
+            <div class="heading-copy">
+              <p class="eyebrow">Fictional task</p>
+              <h1 id="task-title">Robin's quotation</h1>
+              <p id="task-description">A quotation follow-up to review.</p>
+            </div>
+            <span class="mode-label" id="mode-label">Inference disabled</span>
+          </header>
+
+          <div class="global-error" id="global-error" role="alert" hidden></div>
+
+          <section class="conversation-thread" id="conversation-thread" aria-label="Conversation" role="log" aria-live="polite" aria-relevant="additions text" aria-busy="true">
+            <p class="loading-copy" id="loading-copy">Loading saved conversation…</p>
+          </section>
+
+          <section class="activity-section" aria-labelledby="activity-title">
+            <h2 id="activity-title">Activity</h2>
+            <ol class="activity-list" id="activity-list" aria-live="polite" aria-relevant="additions">
+              <li class="activity-empty">Activity will appear here when the server reports it.</li>
+            </ol>
+          </section>
+
+          <form class="composer" id="reply-form">
+            <label class="sr-only" for="reply-input">Your reply or question</label>
+            <textarea id="reply-input" name="question" rows="2" maxlength="4000" placeholder="Ask about Robin's quotation…" autocomplete="off"></textarea>
+            <div class="composer-footer">
+              <p id="composer-note">Live inference is disabled. You can still view the saved conversation or run an offline replay.</p>
+              <div class="composer-actions">
+                <button class="stop-button" id="stop-button" type="button" hidden>Stop</button>
+                <button class="reply-button" id="reply-button" type="submit" disabled>Reply</button>
+              </div>
+            </div>
+          </form>
+        </main>
+      </div>
+    </div>
+
+    <dialog class="reset-dialog" id="reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-copy">
+      <form method="dialog" class="reset-dialog-content">
+        <h2 id="reset-title">Start a new fictional session?</h2>
+        <p id="reset-copy">This replaces the current demo conversation and proposals with a fresh fictional state. It does not change any real account.</p>
+        <div class="reset-actions">
+          <button class="secondary-button" id="reset-cancel" type="button">Keep this session</button>
+          <button class="reply-button" id="reset-confirm" type="button">Reset demo</button>
+        </div>
+      </form>
+    </dialog>
+
+  </body>
+</html>

@@ -102,6 +102,7 @@ use tracing::instrument;
 
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
+const KITCHENFRONT_CODEX_DYNAMIC_ONLY_ENV: &str = "KITCHENFRONT_CODEX_DYNAMIC_ONLY";
 
 #[derive(Clone, Copy)]
 struct CoreToolPlanContext<'a> {
@@ -119,6 +120,99 @@ struct CoreToolPlanContext<'a> {
 #[instrument(level = "trace", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_tool_router(
+    session: &Session,
+    turn_context: &TurnContext,
+    model_info: &ModelInfo,
+    environments: &TurnEnvironmentSnapshot,
+    mcp: &Arc<codex_mcp::McpBinding>,
+    apps_enabled: bool,
+    step_store: &ExtensionData,
+    tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
+) -> CodexResult<ToolRouter> {
+    build_tool_router_with_mode(
+        kitchenfront_dynamic_only_env_enabled(),
+        || build_dynamic_only_tool_router(Arc::clone(&session.tool_policy), turn_context),
+        || {
+            build_default_tool_router(
+                session,
+                turn_context,
+                model_info,
+                environments,
+                mcp,
+                apps_enabled,
+                step_store,
+                tool_suggest_candidates,
+            )
+        },
+    )
+}
+
+fn kitchenfront_dynamic_only_env_enabled() -> bool {
+    kitchenfront_dynamic_only_value_enabled(
+        std::env::var(KITCHENFRONT_CODEX_DYNAMIC_ONLY_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn kitchenfront_dynamic_only_value_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn build_tool_router_with_mode(
+    dynamic_only: bool,
+    dynamic_only_builder: impl FnOnce() -> CodexResult<ToolRouter>,
+    default_builder: impl FnOnce() -> CodexResult<ToolRouter>,
+) -> CodexResult<ToolRouter> {
+    if dynamic_only {
+        dynamic_only_builder()
+    } else {
+        default_builder()
+    }
+}
+
+fn dynamic_tool_specs_are_direct(dynamic_tools: &[DynamicToolSpec]) -> bool {
+    dynamic_tools.iter().all(|tool| match tool {
+        DynamicToolSpec::Function(function) => !function.defer_loading,
+        DynamicToolSpec::Namespace(namespace) => namespace.tools.iter().all(|tool| match tool {
+            DynamicToolNamespaceTool::Function(function) => !function.defer_loading,
+        }),
+    })
+}
+
+fn build_dynamic_only_tool_router(
+    tool_policy: Arc<codex_extension_api::ToolPolicy>,
+    turn_context: &TurnContext,
+) -> CodexResult<ToolRouter> {
+    if !dynamic_tool_specs_are_direct(&turn_context.dynamic_tools) {
+        return Err(CodexErrorDetails::InvalidRequest(
+            "dynamic-only mode requires every dynamic tool to be direct".to_owned(),
+        )
+        .into());
+    }
+
+    let mut registry = ToolRegistry::with_tool_policy(tool_policy);
+    append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
+
+    let model_visible_specs = merge_into_namespaces(
+        registry
+            .entries()
+            .map(|tool| Arc::unwrap_or_clone(tool.spec()))
+            .collect(),
+    );
+
+    Ok(ToolRouter::from_parts(
+        registry,
+        model_visible_specs,
+        ToolMode::Direct,
+        BTreeMap::new(),
+        None,
+        &[],
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_default_tool_router(
     session: &Session,
     turn_context: &TurnContext,
     model_info: &ModelInfo,

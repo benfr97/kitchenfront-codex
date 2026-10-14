@@ -60,6 +60,9 @@ use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::spec_plan::append_source_tools;
 use crate::tools::spec_plan::build_core_tool_registry;
+use crate::tools::spec_plan::build_dynamic_only_tool_router;
+use crate::tools::spec_plan::build_tool_router_with_mode;
+use crate::tools::spec_plan::kitchenfront_dynamic_only_value_enabled;
 
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
@@ -431,6 +434,32 @@ fn mcp_runtime(
         runtime: handler,
         exposure,
         model_spec: None,
+    }
+}
+
+fn seeded_forbidden_sources(dynamic_tools: Vec<DynamicToolSpec>) -> ToolPlanInputs {
+    let mut connector = mcp_tool("calendar", "mcp__calendar", "lookup");
+    connector.connector_id = Some("fictional-calendar-connector".to_string());
+    connector.connector_name = Some("Fictional Calendar".to_string());
+
+    ToolPlanInputs {
+        tool_runtimes: vec![RegisteredTool {
+            runtime: Arc::new(
+                McpHandler::new(connector).expect("connector-backed MCP tool should build"),
+            ),
+            exposure: ToolExposure::Direct,
+            model_spec: None,
+        }],
+        tool_suggest_candidates: Some(plugin_candidates(ToolSuggestPresentation::ListTool)),
+        extension_tool_executors: vec![
+            Arc::new(TestNamespaceExtensionTool {
+                namespace: "crm",
+                tool_name: "lookup",
+            }),
+            Arc::new(DeferredExtensionTool),
+        ],
+        dynamic_tools,
+        ..ToolPlanInputs::default()
     }
 }
 
@@ -1049,6 +1078,168 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
     .await;
     multiple_local_environments.assert_visible_lacks(&["exec_command", "write_stdin"]);
     multiple_local_environments.assert_registered_lacks(&["exec_command", "write_stdin"]);
+}
+
+#[test]
+fn kitchenfront_dynamic_only_flag_requires_exact_one() {
+    for (value, expected) in [
+        (None, false),
+        (Some(""), false),
+        (Some("0"), false),
+        (Some("true"), false),
+        (Some("01"), false),
+        (Some("1 "), false),
+        (Some("1"), true),
+    ] {
+        assert_eq!(
+            kitchenfront_dynamic_only_value_enabled(value),
+            expected,
+            "unexpected dynamic-only decision for {value:?}"
+        );
+    }
+
+    let default_result = build_tool_router_with_mode(
+        kitchenfront_dynamic_only_value_enabled(None),
+        || panic!("dynamic-only builder must not run without exact opt-in"),
+        || Err(CodexErrorDetails::InvalidRequest("default selected".to_owned()).into()),
+    );
+    let default_selected = match default_result {
+        Ok(_) => panic!("the selected default builder deliberately returns an error"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        default_selected.details(),
+        CodexErrorDetails::InvalidRequest(message) if message == "default selected"
+    ));
+}
+
+#[tokio::test]
+async fn dynamic_only_branch_returns_only_direct_dynamic_tools() {
+    let (_session, mut turn) = make_session_and_context().await;
+    set_features(
+        &mut turn,
+        &[
+            Feature::ShellTool,
+            Feature::UnifiedExec,
+            Feature::StandaloneWebSearch,
+            Feature::ToolSuggest,
+            Feature::Apps,
+            Feature::Plugins,
+            Feature::MultiAgentV2,
+        ],
+    );
+    set_web_search_mode(&mut turn, WebSearchMode::Live);
+    use_chatgpt_auth(&mut turn);
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
+        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+    });
+
+    let dynamic = dynamic_tool(None, "get_demo_case", /*defer_loading*/ false);
+    let normal_router = plan_with_model(
+        &turn,
+        turn.model_info(),
+        seeded_forbidden_sources(vec![dynamic.clone()]),
+    );
+    let normal_plan = ToolPlanProbe::from_router(normal_router);
+    normal_plan.assert_visible_contains(&[
+        "exec_command",
+        "mcp__calendar",
+        "crm",
+        "tool_search",
+        "request_plugin_install",
+        "web_search",
+        MULTI_AGENT_V2_NAMESPACE,
+    ]);
+    normal_plan.assert_registered_contains(&[
+        "exec_command",
+        "mcp__calendarlookup",
+        "crmlookup",
+        "extension_echo",
+        "request_plugin_install",
+        "collaborationspawn_agent",
+    ]);
+
+    set_features(&mut turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
+    turn.dynamic_tools = vec![dynamic.clone()];
+    let code_mode_router = plan_with_model(
+        &turn,
+        turn.model_info(),
+        seeded_forbidden_sources(vec![dynamic.clone()]),
+    );
+    let code_mode_plan = ToolPlanProbe::from_router(code_mode_router);
+    code_mode_plan.assert_visible_contains(&[
+        codex_code_mode::PUBLIC_TOOL_NAME,
+        "web_search",
+        MULTI_AGENT_V2_NAMESPACE,
+    ]);
+    code_mode_plan.assert_registered_contains(&[
+        "exec_command",
+        "mcp__calendarlookup",
+        "crmlookup",
+        "extension_echo",
+        "collaborationspawn_agent",
+    ]);
+    let code_mode_router = plan_with_model(
+        &turn,
+        turn.model_info(),
+        seeded_forbidden_sources(vec![dynamic]),
+    );
+
+    let (session, mut turn) = make_session_and_context().await;
+    set_features(&mut turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
+    turn.dynamic_tools = vec![dynamic_tool(
+        None,
+        "get_demo_case",
+        /*defer_loading*/ false,
+    )];
+    let standard_builder_called = std::cell::Cell::new(false);
+    let standard_builder_called_ref = &standard_builder_called;
+    let router = build_tool_router_with_mode(
+        kitchenfront_dynamic_only_value_enabled(Some("1")),
+        || build_dynamic_only_tool_router(Arc::clone(&session.tool_policy), &turn),
+        || {
+            standard_builder_called_ref.set(true);
+            Ok(code_mode_router)
+        },
+    )
+    .expect("direct dynamic-only router should build");
+    assert!(!standard_builder_called.get());
+
+    let plan = ToolPlanProbe::from_router(router);
+    assert_eq!(plan.visible_names, vec!["get_demo_case".to_owned()]);
+    assert_eq!(plan.registered_names, vec!["get_demo_case".to_owned()]);
+    assert_eq!(
+        plan.exposures,
+        BTreeMap::from([("get_demo_case".to_owned(), ToolExposure::Direct)])
+    );
+    assert_eq!(plan.tool_mode, ToolMode::Direct);
+    assert!(plan.code_mode_tool_names.is_empty());
+    assert!(plan.tool_namespaces_info.is_none());
+    assert!(!plan.requires_code_mode_worker);
+    assert!(!plan.has_terminal_controls);
+    assert!(!plan.can_manage_children);
+}
+
+#[tokio::test]
+async fn dynamic_only_branch_rejects_deferred_tools() {
+    let (session, mut turn) = make_session_and_context().await;
+    turn.dynamic_tools = vec![dynamic_tool(
+        None,
+        "hidden_demo_tool",
+        /*defer_loading*/ true,
+    )];
+
+    let result = build_dynamic_only_tool_router(Arc::clone(&session.tool_policy), &turn);
+    let error = match result {
+        Ok(_) => panic!("dynamic-only mode must not retain a hidden executor"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message)
+            if message == "dynamic-only mode requires every dynamic tool to be direct"
+    ));
 }
 
 #[tokio::test]
