@@ -43,8 +43,9 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 
 .app-shell {
   display: flex;
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   flex-direction: column;
   overflow: hidden;
 }
@@ -105,6 +106,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   display: flex;
   min-height: 0;
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 24px 14px 16px;
   border-right: 1px solid var(--line);
   background: var(--cream);
@@ -201,7 +204,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .empty-copy strong { display: block; margin-bottom: 5px; color: var(--ink); font-size: 14px; }
 .message { display: flex; width: 100%; flex-direction: column; align-items: flex-start; gap: 5px; }
 .message--user { align-items: flex-end; }
-.message-meta { display: flex; max-width: min(78%, 660px); align-items: baseline; gap: 8px; color: var(--muted); font-size: 10px; }
+.message-meta { display: flex; flex-wrap: wrap; max-width: min(78%, 660px); align-items: baseline; gap: 8px; color: var(--muted); font-size: 10px; }
 .message--user .message-meta { justify-content: flex-end; }
 .message-meta strong { color: #52534c; font-size: 11px; font-weight: 650; }
 .message-meta time { white-space: nowrap; }
@@ -310,7 +313,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .simulation-notice p, .engine-detail { grid-column: 2; }
   .engine-detail { margin-left: 0; font-size: 10px; text-align: left; }
   .app-layout { display: flex; flex-direction: column; }
-  .task-rail { flex: 0 0 auto; padding: 8px 10px 7px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .task-rail { flex: 0 1 auto; max-height: min(38vh, 320px); max-height: min(38dvh, 320px); padding: 8px 10px 7px; border-right: 0; border-bottom: 1px solid var(--line); }
   .rail-heading, .rail-footnote { display: none; }
   .task-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; }
   .task-button { min-height: 54px; padding: 6px 7px 6px 10px; }
@@ -323,7 +326,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .replay-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
   .replay-button { min-height: 48px; padding: 6px; font-size: 10px; }
   .replay-button small { font-size: 9px; }
-  .conversation { width: 100%; flex: 1; padding-inline: 15px; }
+  .conversation { width: 100%; flex: 1 1 0; padding-inline: 15px; }
   .conversation-heading { min-height: 82px; gap: 8px; padding: 12px 0 10px; }
   .conversation-heading h1 { font-size: 17px; }
   .conversation-heading .heading-copy > p:last-child { max-width: 34ch; font-size: 11px; }
@@ -362,6 +365,17 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .activity-list { max-height: 52px; }
   .composer { gap: 5px; padding-block: 7px max(8px, env(safe-area-inset-bottom)); }
   .composer textarea { min-height: 48px; max-height: 92px; }
+}
+
+@media (max-height: 560px) {
+  .composer { position: sticky; bottom: 0; z-index: 2; }
+}
+
+@media (max-height: 560px) {
+  .app-shell { height: auto; min-height: 100vh; min-height: 100dvh; overflow: visible; }
+  .app-layout { flex: 0 0 auto; min-height: 480px; }
+  .task-rail { max-height: none; overflow-y: visible; }
+  .conversation { min-height: 440px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

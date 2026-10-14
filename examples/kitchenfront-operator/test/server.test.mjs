@@ -8,6 +8,10 @@ import {request} from 'node:http';
 import {createPrototypeServer} from '../server.mjs';
 import {SessionStore} from '../lib/store.mjs';
 
+test('exported HTTP server cannot silently create a historical fixture store', () => {
+  assert.throws(() => createPrototypeServer(), /explicit owned session store/);
+});
+
 async function harness(t) {
   const directory = mkdtempSync(join(tmpdir(), 'kf-fork-test-'));
   const store = new SessionStore(directory); const server = createPrototypeServer({store});
@@ -55,11 +59,12 @@ test('HTTP replay is labelled, persisted and deduplicated; exact approvals affec
   assert.equal((await a.get()).activity.filter(x => x.kind === 'decision').length, 1);
   const duplicate = await a.post('/api/replay', {scenario: 'reply', requestId}); assert.equal(duplicate.status, 409);
   assert.equal((await a.get()).messages.length, 2); assert.equal((await b.get()).messages.length, 0);
-  const restarted = new SessionStore(directory); const token = a.cookie.split('=')[1];
+  store.close(); const restarted = new SessionStore(directory); const token = a.cookie.split('=')[1];
   assert.equal(restarted.get(token).state.proposals[0].status, 'approved'); assert.equal(restarted.get(token).state.messages.length, 2);
   assert.equal(statSync(directory).mode & 0o777, 0o700);
   for (const file of readdirSync(directory)) assert.equal(statSync(join(directory, file)).mode & 0o777, 0o600);
   assert.equal(store.get(token).state.proposals[0].recipient, 'alex@example.com');
+  restarted.close();
 });
 test('reset invalidates old proposals and approval rechecks occupied fictional slots', async t => {
   const {client} = await harness(t); const c = await client();
@@ -81,8 +86,16 @@ test('invalid payloads and oversized requests do not change saved state', async 
 test('unfinished persisted request is UNKNOWN after restart, not retried or declared complete', async t => {
   const {store, directory} = await harness(t); const session = store.create();
   session.state.requests.run = {status: 'running'}; session.state.activity.push({kind: 'turn', status: 'running'}); store.save(session);
-  const restarted = new SessionStore(directory); const saved = restarted.get(session.token);
+  store.close(); const restarted = new SessionStore(directory); const saved = restarted.get(session.token);
   assert.equal(saved.state.requests.run.status, 'unknown'); assert.equal(saved.state.activity[0].status, 'unknown');
-  const file = readdirSync(directory).find(name => JSON.parse(readFileSync(join(directory, name))).token === session.token);
+  const file = readdirSync(directory).filter(name => name.endsWith('.json')).find(name => JSON.parse(readFileSync(join(directory, name))).token === session.token);
   assert.equal(JSON.parse(readFileSync(join(directory, file))).state.requests.run.status, 'unknown');
+  restarted.close();
+});
+test('a second state owner is refused until the exact first owner releases its lock', async t => {
+  const {store, directory} = await harness(t);
+  assert.throws(() => new SessionStore(directory), /already has an owner/);
+  const record = store.create(); store.close(); const second = new SessionStore(directory);
+  assert.throws(() => new SessionStore(directory), /already has an owner/);
+  assert.throws(() => store.save(record), /no longer owns/); second.close();
 });

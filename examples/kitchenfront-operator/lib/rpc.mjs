@@ -86,9 +86,11 @@ export class AppServerRpc extends EventEmitter {
   close() { this.#fail(new ProtocolError('ENGINE_CLOSED', 'The engine connection was closed.')); }
 }
 
-export function isolatedEngineEnvironment(runtimeHome, extra = {}) {
+export function isolatedEngineEnvironment(runtimeHome) {
   const allowed = {};
   for (const name of ['PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot']) if (process.env[name]) allowed[name] = process.env[name];
   // This is scoped to the child. It does not change Codex Desktop's environment or files.
-  return {...allowed, CODEX_HOME: runtimeHome, KITCHENFRONT_CODEX_DYNAMIC_ONLY: '1', ...extra};
+  // The dedicated development build supports this upstream test switch. Outer
+  // containment still denies host config access; this is not a release-build guarantee.
+  return {...allowed, HOME: runtimeHome, TMPDIR: runtimeHome, CODEX_HOME: runtimeHome, KITCHENFRONT_CODEX_DYNAMIC_ONLY: '1', CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG: '1'};
 }

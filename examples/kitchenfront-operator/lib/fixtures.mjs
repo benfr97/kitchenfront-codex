@@ -39,6 +39,17 @@ export function freshState() {
 }
 export function getCase(state, caseId) {
   if (!CASE_IDS.includes(caseId)) throw new DemoError('UNKNOWN_CASE', 'Choose one of the three fictional cases.');
+  if (state.snapshot) {
+    const snapshot = state.snapshot;
+    if (snapshot.sessionId !== state.generation) throw new DemoError('SESSION_BINDING', 'This date snapshot belongs to a different session.', 409);
+    if (snapshot.status !== 'ready_offline') throw new DemoError('HORIZON_EXHAUSTED', 'The fictional dataset does not cover this date. No fallback case is supplied.', 409);
+    const value = copy(snapshot.cases[caseId]);
+    if (!value || value.sessionId !== state.generation || value.snapshotDigest !== snapshot.snapshotDigest) throw new DemoError('SNAPSHOT_BINDING', 'The fictional case does not match this pinned snapshot.', 409);
+    const diary = value.calendar;
+    return {...value, pinnedAt: snapshot.pinnedAt,
+      ...(caseId === 'consultation' ? {calendarEvidence: diary, calendar: CALENDAR,
+        slots: diary.candidates.map(slot => ({start: slot.start, end: slot.end, timeZone: slot.timeZone, calendar: CALENDAR, available: !overlapsAny({...slot, calendar: CALENDAR}, state.appointments)}))} : {})};
+  }
   const value = copy(baseCases[caseId]);
   return {...value, fictional: true, scenarioDate: SCENARIO_DATE, timeZone: TIME_ZONE,
     sourceIds: [value.lead.id, ...value.correspondence.map(item => item.id)],
@@ -65,9 +76,9 @@ export function prepareProposal(state, args, observedCases, {requestId, mode}) {
   const kind = args.caseId === 'consultation' ? 'consultation' : 'reply';
   let fields = {caseId: args.caseId, kind, title: fixture.label, recipient: args.recipient, body, sourceIds: [...args.sourceIds]};
   if (kind === 'consultation') {
-    const slot = allSlots.find(slot => slot.start === args.start && slot.end === args.end && slot.timeZone === args.timeZone && slot.calendar === args.calendar);
+    const slot = (state.snapshot ? fixture.slots.filter(slot => slot.available) : allSlots).find(slot => slot.start === args.start && slot.end === args.end && slot.timeZone === args.timeZone && slot.calendar === args.calendar);
     if (!slot || overlapsAny(slot, state.appointments)) throw new DemoError('SLOT_CONFLICT', 'That exact seeded slot is unavailable. No appointment was created.', 409);
-    fields = {...fields, ...slot};
+    fields = {...fields, start: slot.start, end: slot.end, timeZone: slot.timeZone, calendar: slot.calendar};
   } else {
     if (['start', 'end', 'timeZone', 'calendar'].some(key => args[key] != null)) throw new DemoError('INVALID_ARGUMENTS', 'A reply cannot contain a calendar action.');
     fields.subject = text(args.subject, 'subject', 160);
@@ -129,7 +140,7 @@ export async function replayScenario(state, caseId, requestId, emit) {
   const body = caseId === 'quotation' ? 'Hello Robin, would you like to discuss the proposed scope of quotation DEMO-Q017 or any questions you have about it?' : caseId === 'reply' ? 'Hello Alex, thank you for sharing your plans for a kitchen with an island. What budget and timing do you have in mind?' : 'Hello Casey, would you like the available fictional consultation slot shown below?';
   let fields;
   if (caseId === 'consultation') {
-    const slot = fixture.slots.find(slot => slot.available && slot.start.includes('T10:00'));
+    const slot = fixture.slots.find(slot => slot.available && (state.snapshot || slot.start.includes('T10:00')));
     if (!slot) throw new DemoError('SLOT_CONFLICT', 'The seeded consultation slot is occupied.', 409);
     const {available, ...exactSlot} = slot;
     fields = exactSlot;

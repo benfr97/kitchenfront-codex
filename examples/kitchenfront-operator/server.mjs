@@ -5,10 +5,12 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {randomUUID, timingSafeEqual, createHash} from 'node:crypto';
 import {SessionStore} from './lib/store.mjs';
-import {DemoError, freshState, replayScenario, decideProposal, CASE_IDS} from './lib/fixtures.mjs';
+import {DemoError, replayScenario, decideProposal, CASE_IDS} from './lib/fixtures.mjs';
+import {loadSealedPacket} from './lib/date-snapshot.mjs';
+import {currentStateFactory, publicDateContext} from './lib/current-session.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const BLOCKER = 'Live AI is disabled. The custom fork still needs a compiled, independently reviewed runtime, OS isolation and separate model-test authority. Offline replay only tests the interface.';
+const BLOCKER = 'Live AI is disabled until the credential, external-network policy and bounded model-test budget are approved and checked. Offline replay only tests the interface.';
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const exact = (body, keys) => {
@@ -16,7 +18,7 @@ const exact = (body, keys) => {
 };
 const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const publicState = session => ({csrfToken: session.csrfToken, expiresAt: new Date(session.expiresAt).toISOString(), generation: session.state.generation,
-  engine: {name: 'Codex App Server', version: '0.160.0 protocol target; custom fork unbuilt', status: 'not_verified'},
+  engine: {name: 'Codex App Server', version: 'custom fork 0.0.0', status: 'not_verified'}, dateContext: publicDateContext(session.state),
   liveEnabled: false, liveBlocker: BLOCKER, messages: session.state.messages, proposals: session.state.proposals, activity: session.state.activity});
 
 async function jsonBody(req) {
@@ -27,7 +29,8 @@ async function jsonBody(req) {
 }
 function json(res, status, value) { res.writeHead(status, {'Content-Type': 'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 
-export function createPrototypeServer({stateDirectory = join(homedir(), '.local', 'state', 'kitchenfront-codex-prototype'), store = new SessionStore(stateDirectory)} = {}) {
+export function createPrototypeServer({store} = {}) {
+  if (!(store instanceof SessionStore)) throw new Error('Provide an explicit owned session store with its reviewed state factory.');
   const active = new Map();
   const files = new Map([['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/styles.css', ['styles.css', 'text/css']]]);
   const server = createServer(async (req, res) => {
@@ -65,7 +68,7 @@ export function createPrototypeServer({stateDirectory = join(homedir(), '.local'
       }
       if (active.has(session.token)) throw new DemoError('REQUEST_ACTIVE', 'Wait for this fictional request to finish before changing the scenario.', 409);
       if (path === '/api/reset') {
-        exact(body, []); store.replaceState(session, freshState()); json(res, 200, publicState(session)); return;
+        exact(body, []); store.replaceState(session, store.freshState()); json(res, 200, publicState(session)); return;
       }
       const decision = /^\/api\/proposals\/([0-9a-f-]+)\/decision$/.exec(path);
       if (decision) {
@@ -105,12 +108,16 @@ export function createPrototypeServer({stateDirectory = join(homedir(), '.local'
     }
   });
   server.requestTimeout = 10_000; server.headersTimeout = 10_000; server.maxHeadersCount = 40;
+  server.once('close', () => store.close());
   return server;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = Number(process.env.PORT ?? 51840);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Choose a valid local port.');
-  const server = createPrototypeServer(); server.listen(port, '127.0.0.1', () => process.stdout.write(`Local fictional prototype: http://127.0.0.1:${port}\nLive AI: disabled\n`));
+  const packet = await loadSealedPacket(process.env.KITCHENFRONT_TWO_YEAR_PACKET_DIR);
+  const stateDirectory = join(homedir(), '.local', 'state', 'kitchenfront-codex-current-date');
+  const store = new SessionStore(stateDirectory, {stateFactory: currentStateFactory(packet)});
+  const server = createPrototypeServer({store}); server.listen(port, '127.0.0.1', () => process.stdout.write(`Local fictional prototype: http://127.0.0.1:${port}\nLive AI: disabled\n`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => server.close());
 }

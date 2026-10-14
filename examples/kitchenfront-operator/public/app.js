@@ -28,6 +28,8 @@ const TASKS = [
 const state = {
   session: null,
   selectedTask: 'quotation',
+  initialSessionLoaded: false,
+  hasUserSelectedTask: false,
   serverMessages: [],
   transientMessages: [],
   proposals: [],
@@ -39,6 +41,7 @@ const state = {
   proposalErrors: new Map(),
   globalError: '',
   loading: true,
+  scrollToLatest: true,
   resetBusy: false,
   sessionLoadFailed: false
 };
@@ -184,6 +187,17 @@ function setSession(session) {
   state.serverMessages = arrayValue(state.session.messages);
   state.proposals = arrayValue(state.session.proposals);
   state.activity = arrayValue(state.session.activity);
+  if (!state.initialSessionLoaded) {
+    state.initialSessionLoaded = true;
+    if (!state.hasUserSelectedTask) {
+      const latestProposal = state.proposals.at(-1);
+      const inferredTask = latestProposal && TASKS.find((task) => task.id === latestProposal.caseId);
+      if (inferredTask) {
+        state.selectedTask = inferredTask.id;
+        elements.replyInput.value = inferredTask.prompt;
+      }
+    }
+  }
   state.loading = false;
   for (const proposalId of state.lockedProposals) {
     const proposal = state.proposals.find((item) => item.id === proposalId);
@@ -206,20 +220,21 @@ function restorePendingRequest() {
   const terminalStatuses = new Set(['completed', 'complete', 'succeeded', 'failed', 'interrupted']);
   const savedAnswer = state.serverMessages.some((message) => firstText(message, ['requestId', 'request_id']) === requestId && roleFor(message) === 'assistant');
   if (terminalStatuses.has(status) || savedAnswer || !['started', 'pending', 'running', 'stop_requested', 'stopping'].includes(status)) return;
+  const replay = latest.mode === 'offline_replay';
   state.runSerial += 1;
   state.activeRun = {
     serial: state.runSerial,
     requestId,
-    kind: 'turn',
-    replay: false,
+    kind: replay ? 'replay' : 'turn',
+    replay,
     taskId: state.selectedTask,
-    mode: '',
+    mode: replay ? 'offline_replay' : '',
     turnId: '',
     started: true,
     terminal: false,
     finalState: '',
     answerText: '',
-    error: 'A previous request has no final event in this page. Check the saved session or request a stop.',
+    error: replay ? 'A previous offline replay has no final event in this page. Check the saved session.' : 'A previous request has no final event in this page. Check the saved session or request a stop.',
     unknown: true,
     stopRequested: status === 'stop_requested' || status === 'stopping',
     stopSending: false,
@@ -264,7 +279,7 @@ function displayTime(value) {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/London' }).format(date);
 }
 
 function renderTaskList() {
@@ -310,7 +325,9 @@ function selectTask(id) {
   if (state.activeRun) return;
   const oldTask = currentTask();
   const newTask = TASKS.find((task) => task.id === id);
-  if (!newTask || newTask.id === oldTask.id) return;
+  if (!newTask) return;
+  state.hasUserSelectedTask = true;
+  if (newTask.id === oldTask.id) return;
   const input = elements.replyInput;
   const draft = input.value.trim();
   if (!draft || draft === oldTask.prompt) input.value = newTask.prompt;
@@ -333,6 +350,20 @@ function renderHeader() {
   const liveEnabled = session.liveEnabled === true;
   elements.engineStatus.textContent = liveEnabled ? 'Inference available' : 'Inference disabled';
   elements.engineDetail.textContent = `${engineName || 'Engine'} · ${engineStatusLabel || 'Status unknown'}`;
+  const clock = document.querySelector('#scenario-clock');
+  const dateContext = session.dateContext;
+  const caseContext = dateContext?.cases?.[task.id];
+  if (caseContext) {
+    const londonDate = value => new Intl.DateTimeFormat('en-GB', {dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/London'}).format(new Date(value));
+    elements.taskDescription.textContent = task.id === 'quotation'
+      ? `Fictional quotation awaiting a reply for ${caseContext.quoteAgeDays} days. Total and attachment are not supplied.`
+      : task.id === 'reply'
+        ? `Fictional enquiry received ${londonDate(caseContext.latestMessageAt)}. Budget and timing are unknown.`
+        : `Fictional request for ${londonDate(caseContext.requestedStart)}. Check the diary before proposing a time.`;
+  }
+  clock.textContent = dateContext?.pinnedAt
+    ? `Scenario pinned to ${new Intl.DateTimeFormat('en-GB', {dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/London'}).format(new Date(dateContext.pinnedAt))} · London${dateContext.status === 'horizon_exhausted' ? ' · dataset expired' : ''}`
+    : 'Historical protocol fixture · 13 Oct 2026';
   const blocker = typeof session.liveBlocker === 'string' ? session.liveBlocker.trim() : '';
   elements.engineStatus.title = blocker || (engineName ? `${engineName}${engineStatusLabel ? `, ${engineStatusLabel}` : ''}` : '');
   elements.modeLabel.textContent = state.activeRun?.mode === 'offline_replay'
@@ -360,7 +391,10 @@ function renderMessage(message) {
   if (!normalized) return null;
   const article = element('article', `message message--${normalized.role}`);
   const meta = element('div', 'message-meta');
-  meta.append(element('strong', '', normalized.role === 'user' ? 'You' : 'Operator'));
+  const related = state.proposals.find((proposal) => proposal.requestId === message.requestId);
+  const person = TASKS.find((task) => task.id === related?.caseId)?.person;
+  const speaker = normalized.role === 'user' ? 'You' : 'Operator';
+  meta.append(element('strong', '', person ? `${speaker} · ${person}` : speaker));
   if (normalized.mode === 'offline_replay') {
     const tag = element('span', 'message-tag', 'OFFLINE REPLAY');
     tag.dataset.mode = 'offline_replay';
@@ -407,11 +441,18 @@ function renderThread() {
     return;
   }
   const messages = dedupedMessages();
-  for (const message of messages) {
+  const shownProposals = new Set();
+  for (const [index, message] of messages.entries()) {
     const node = renderMessage(message);
     if (node) elements.thread.append(node);
+    const requestId = message.requestId;
+    if (requestId && !messages.slice(index + 1).some((later) => later.requestId === requestId)) {
+      for (const proposal of state.proposals.filter((item) => item.requestId === requestId)) {
+        elements.thread.append(renderProposal(proposal)); shownProposals.add(proposal.id);
+      }
+    }
   }
-  for (const proposal of state.proposals) elements.thread.append(renderProposal(proposal));
+  for (const proposal of state.proposals) if (!shownProposals.has(proposal.id)) elements.thread.append(renderProposal(proposal));
   if (state.activeRun && state.activeRun.answerText) {
     const partial = { role: 'assistant', text: state.activeRun.answerText, mode: state.activeRun.mode, partial: true };
     const node = renderMessage(partial);
@@ -433,7 +474,8 @@ function renderThread() {
     }
   }
   elements.thread.setAttribute('aria-busy', String(Boolean(state.activeRun && !state.activeRun.terminal)));
-  if (wasAtBottom) elements.thread.scrollTop = elements.thread.scrollHeight;
+  if (wasAtBottom || state.scrollToLatest) elements.thread.scrollTop = elements.thread.scrollHeight;
+  state.scrollToLatest = false;
 }
 
 function renderRunError(message, unknown = false, finalState = '') {
@@ -655,7 +697,7 @@ function updateComposer() {
   elements.resetOpen.disabled = !state.session || state.loading || unsettled || state.resetBusy;
   const blocker = typeof state.session?.liveBlocker === 'string' ? state.session.liveBlocker.trim() : '';
   elements.composerNote.textContent = !liveEnabled
-    ? `Live inference is disabled.${blocker ? ` ${blocker}` : ''} Saved history and offline replays remain available.`
+    ? blocker || 'Saved history and offline replays are available.'
     : unsettled
       ? activeRun.terminal ? 'The turn finished. Refreshing saved history…' : activeRun.unknown ? 'The request may still be running. Wait for a final server event before sending again.' : 'Waiting for the server to finish this turn.'
       : 'Replies are prepared for review. Email and calendar effects remain simulated.';
@@ -945,6 +987,7 @@ async function startReplay(taskId) {
   const task = TASKS.find((item) => item.id === taskId);
   if (!task) return;
   state.selectedTask = task.id;
+  state.hasUserSelectedTask = true;
   renderHeader();
   renderTaskList();
   const requestId = crypto.randomUUID();

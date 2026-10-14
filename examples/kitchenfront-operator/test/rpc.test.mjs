@@ -51,7 +51,9 @@ test('server-initiated shell API is refused without calling the application hand
 test('isolated child environment omits existing credentials and desktop configuration variables', () => {
   const result = isolatedEngineEnvironment('/tmp/fictional-codex-runtime');
   assert.equal(result.CODEX_HOME, '/tmp/fictional-codex-runtime'); assert.equal(result.KITCHENFRONT_CODEX_DYNAMIC_ONLY, '1');
-  assert.equal(result.OPENAI_API_KEY, undefined); assert.equal(result.HOME, undefined); assert.equal(result.CODEX_THREAD_ID, undefined);
+  assert.equal(result.OPENAI_API_KEY, undefined); assert.equal(result.HOME, '/tmp/fictional-codex-runtime'); assert.equal(result.CODEX_THREAD_ID, undefined);
+  const cannotOverride = isolatedEngineEnvironment('/tmp/fixed', {OPENAI_API_KEY: 'not-a-real-key', CODEX_HOME: '/elsewhere', KITCHENFRONT_CODEX_DYNAMIC_ONLY: '0'});
+  assert.equal(cannotOverride.OPENAI_API_KEY, undefined); assert.equal(cannotOverride.CODEX_HOME, '/tmp/fixed'); assert.equal(cannotOverride.KITCHENFRONT_CODEX_DYNAMIC_ONLY, '1');
 });
 test('thread setup binds the fixed catalogue and exact model; mismatched model rejects', async () => {
   let sent;
@@ -72,7 +74,8 @@ const launch = (peer, state, extra = {}) => runCodexTurn(peer, {threadId: 'threa
 test('mock wire run stages source-bound proposals without mutating committed session; accepts only completed turn', async () => {
   const peer = new TurnPeer(); const state = freshState(); const events = []; const result = launch(peer, state, {emit: item => events.push(item)}); await tick();
   await assert.rejects(peer.handler({threadId: 'other-thread', turnId: 'turn-owned', tool: 'get_demo_case', arguments: {caseId: 'reply'}}), {code: 'TOOL_SCOPE'});
-  const source = await peer.handler({threadId: 'thread-owned', turnId: 'turn-owned', callId: 'read', tool: 'get_demo_case', arguments: {caseId: 'reply'}});
+  await assert.rejects(peer.handler({threadId: 'thread-owned', turnId: 'turn-owned', namespace: 'shell', tool: 'get_demo_case', arguments: {caseId: 'reply'}}), {code: 'TOOL_SCOPE'});
+  const source = await peer.handler({threadId: 'thread-owned', turnId: 'turn-owned', namespace: 'functions', callId: 'read', tool: 'get_demo_case', arguments: {caseId: 'reply'}});
   assert.equal(source.success, true); const fixture = getCase(state, 'reply');
   const prepared = await peer.handler({threadId: 'thread-owned', turnId: 'turn-owned', callId: 'proposal', tool: 'prepare_demo_proposal', arguments: {caseId: 'reply', recipient: fixture.lead.email, subject: 'Your kitchen enquiry', body: 'Hello Alex, what budget and timing do you have in mind?', sourceIds: fixture.sourceIds}});
   assert.equal(prepared.success, true); assert.equal(state.proposals.length, 0);
@@ -85,6 +88,27 @@ test('Stop retains uncertainty and interrupts exact turn; partial staged work do
   controller.abort(); await assert.rejects(result, {code: 'TURN_STOPPED_UNKNOWN'});
   assert.deepEqual(peer.calls.find(item => item.method === 'turn/interrupt').params, {threadId: 'thread-owned', turnId: 'turn-owned'});
   assert.equal(state.proposals.length, 0);
+});
+test('missing or foreign turn IDs cannot enter the accepted answer or usage', async () => {
+  const peer = new TurnPeer(); const attempt = launch(peer, freshState()); await tick();
+  peer.emit('notification', {method: 'item/agentMessage/delta', params: {threadId: 'thread-owned', delta: 'Unowned text'}});
+  peer.event('thread/tokenUsage/updated', {turnId: 'other', tokenUsage: {total: 999}});
+  peer.event('item/agentMessage/delta', {turnId: 'other', delta: 'Foreign text'});
+  peer.event('item/agentMessage/delta', {delta: 'Owned result.'}); peer.event('turn/completed', {turn: {id: 'turn-owned', status: 'completed'}});
+  const result = await attempt; assert.equal(result.answer, 'Owned result.'); assert.equal(result.usage, null);
+});
+test('late prior-turn events before a delayed start receipt cannot contaminate a new answer', async () => {
+  const peer = new TurnPeer(); let release;
+  peer.request = async (method, params) => { peer.calls.push({method, params}); return new Promise(resolve => { release = resolve; }); };
+  const attempt = launch(peer, freshState()); await tick();
+  peer.event('item/agentMessage/delta', {turnId: 'previous-turn', delta: 'Stale text'});
+  peer.event('thread/tokenUsage/updated', {turnId: 'previous-turn', tokenUsage: {total: 999}});
+  peer.event('turn/completed', {turn: {id: 'previous-turn', status: 'completed'}});
+  await assert.rejects(peer.handler({threadId: 'thread-owned', turnId: 'previous-turn', tool: 'get_demo_case', arguments: {caseId: 'reply'}}), {code: 'TOOL_SCOPE'});
+  release({turn: {id: 'turn-owned'}}); await tick();
+  peer.event('turn/completed', {turn: {id: 'previous-turn', status: 'completed'}});
+  peer.event('item/agentMessage/delta', {delta: 'Current result.'}); peer.event('turn/completed', {turn: {id: 'turn-owned', status: 'completed'}});
+  const result = await attempt; assert.equal(result.answer, 'Current result.'); assert.equal(result.usage, null);
 });
 test('unexpected native tool, missing completion and time limit never become a successful answer', async () => {
   const forbidden = new TurnPeer(); const attempt = launch(forbidden, freshState()); await tick(); forbidden.event('item/started', {item: {type: 'commandExecution'}}); await assert.rejects(attempt, {code: 'UNEXPECTED_ENGINE_TOOL'});
