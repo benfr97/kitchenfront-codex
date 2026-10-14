@@ -1,0 +1,45 @@
+name: Kitchen Front isolated prototype checks
+on:
+  push:
+    branches: [codex/phone-prototype]
+    paths:
+      - examples/kitchenfront-operator/**
+      - codex-rs/core/src/tools/spec_plan.rs
+      - codex-rs/core/src/tools/spec_plan_tests.rs
+      - .github/workflows/kitchenfront-prototype.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kitchenfront-prototype-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  client:
+    if: github.repository == 'benfr97/kitchenfront-codex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test test/*.test.mjs
+        working-directory: examples/kitchenfront-operator
+  restricted-engine:
+    if: github.repository == 'benfr97/kitchenfront-codex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install upstream build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+      - name: Install exact upstream Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Compile and run the dynamic-only router tests
+        working-directory: codex-rs
+        run: cargo test --locked -p codex-core --lib dynamic_only -- --nocapture
