@@ -5,9 +5,16 @@ on:
     paths:
       - .github/workflows/kitchenfront-linux-engine.yml
       - examples/kitchenfront-operator/scripts/fixture-engine-check.mjs
+      - examples/kitchenfront-operator/scripts/package-linux-engine.mjs
       - examples/kitchenfront-operator/lib/linux-fixture-isolation.mjs
       - examples/kitchenfront-operator/test/linux-fixture-isolation.test.mjs
   workflow_dispatch:
+    inputs:
+      retain_engine_artifact:
+        description: Upload one short-lived public Linux engine bundle after all proof steps pass.
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -81,5 +88,24 @@ jobs:
           chmod 700 "$wrapper"
           sudo "$wrapper" enter "$(id -u)" "$(id -g)" "$node_binary" "$script" "$binary" "$expected_hash"
           printf '%s\n' 'Protocol fixture only: no genuine model or provider call; no hosted acceptance.' >> "$GITHUB_STEP_SUMMARY"
-      # Deliberately no artifact/cache upload or deployment. Logs record the
-      # public engine proof; private product code, accounts and keys are absent.
+      - name: Test opt-in package with synthetic fixture files
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.retain_engine_artifact == true }}
+        run: node examples/kitchenfront-operator/scripts/package-linux-engine.mjs --self-test
+      - name: Package the exact public engine, catalog and notices
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.retain_engine_artifact == true }}
+        run: >-
+          node examples/kitchenfront-operator/scripts/package-linux-engine.mjs
+          --binary codex-rs/target/release/codex-app-server
+          --output "$RUNNER_TEMP/kitchenfront-linux-engine.tar.gz"
+      # This remains opt-in to an explicit manual dispatch after the full
+      # model-free fixture. The bundle contains only public engine inputs and
+      # notices; it is not a deploy or a model/provider call.
+      - name: Retain the single compressed public engine artifact for one day
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.retain_engine_artifact == true }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Direct single-file upload uses this filename as the artifact name.
+          path: ${{ runner.temp }}/kitchenfront-linux-engine.tar.gz
+          archive: false
+          retention-days: 1
+          if-no-files-found: error
